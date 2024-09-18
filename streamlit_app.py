@@ -1,151 +1,105 @@
 import streamlit as st
 import pandas as pd
-import math
-from pathlib import Path
-
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
-
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
-
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
-
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
-
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
-
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
-
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
-
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
+import zipfile
+from io import BytesIO
+import base64
+from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.generator import BytesGenerator
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
+def split_excel_and_zip(df, column_name):
+    zip_buffer = BytesIO()
 
-st.header(f'GDP in {to_year}', divider='gray')
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for value, group in df.groupby(column_name):
+            excel_buffer = BytesIO()
 
-''
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                group.to_excel(writer, index=False, sheet_name='Sheet1')
 
-cols = st.columns(4)
+            excel_buffer.seek(0)
+            zipf.writestr(f"{value}.xlsx", excel_buffer.getvalue())
 
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
+    zip_buffer.seek(0)
+    return zip_buffer
 
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
 
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
+def create_outlook_emails(df, column_name, email_list):
+    zip_buffer = BytesIO()
 
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for value, group in df.groupby(column_name):
+            # Create Excel file in memory
+            excel_buffer = BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                group.to_excel(writer, index=False, sheet_name='Sheet1')
+            excel_buffer.seek(0)
+
+            # Create email message
+            msg = MIMEMultipart()
+            msg['Subject'] = f'Split Excel File - {value}'
+            msg['To'] = '; '.join(email_list)
+            msg['From'] = 'your_email@example.com'  # Add a From address
+            msg.attach(MIMEText(f'Please find attached the Excel file for {value}.'))
+
+            # Attach Excel file
+            part = MIMEBase('application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            part.set_payload(excel_buffer.getvalue())
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', f'attachment; filename="{value}.xlsx"')
+            msg.attach(part)
+
+            # Save as .eml file
+            eml_file = BytesIO()
+            generator = BytesGenerator(eml_file)
+            generator.flatten(msg)
+            eml_file.seek(0)
+
+            zipf.writestr(f"{value}.eml", eml_file.getvalue())
+
+    zip_buffer.seek(0)
+    return zip_buffer
+
+
+st.title('Excel File Splitter')
+
+uploaded_file = st.file_uploader("Choose an Excel file", type="xlsx")
+
+if uploaded_file is not None:
+    df = pd.read_excel(uploaded_file)
+    st.write("File uploaded successfully. Preview:")
+    st.write(df.head())
+
+    column_name = st.selectbox("Select the column to split by:", df.columns)
+
+    output_format = st.radio("Choose output format:", ("ZIP", "Email"))
+
+    if output_format == "Email":
+        email_list = st.text_area("Enter email addresses (one per line):")
+        email_list = [email.strip() for email in email_list.split('\n') if email.strip()]
+
+    if st.button("Process"):
+        if output_format == "ZIP":
+            zip_buffer = split_excel_and_zip(df, column_name)
+
+            st.download_button(
+                label="Download ZIP file",
+                data=zip_buffer,
+                file_name="suppliers_files.zip",
+                mime="application/zip"
+            )
+        else:  # Email format
+            if email_list:
+                zip_buffer = create_outlook_emails(df, column_name, email_list)
+
+                st.download_button(
+                    label="Download Email Files (ZIP)",
+                    data=zip_buffer,
+                    file_name="email_files.zip",
+                    mime="application/zip"
+                )
+            else:
+                st.error("Please enter at least one email address.")

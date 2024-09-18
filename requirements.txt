@@ -1,2 +1,7 @@
 streamlit
 pandas
+email
+zipfile
+io
+base64
+openpyxl
